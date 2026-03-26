@@ -9,6 +9,7 @@ from typing import Protocol
 
 from ..canvas import Canvas
 from ..charset import CharSet
+from ..textwidth import char_width, display_width
 from ...graph.shapes import NodeShape
 
 
@@ -127,9 +128,10 @@ def draw_diamond(
         │         │
         └────◆────┘
     """
-    cx = x + width // 2
     is_unicode = cs.horizontal == "─"
     marker = "◇" if is_unicode else "*"
+    mw = char_width(marker)
+    cx = x + (width - mw) // 2 if mw > 1 else x + width // 2
 
     # Top border with ◆ at center
     canvas.put(y, x, cs.top_left, style=style)
@@ -191,9 +193,10 @@ def draw_circle(
         │         │
         ╰────◯────╯
     """
-    cx = x + width // 2
     is_unicode = cs.horizontal == "─"
     marker = "◯" if is_unicode else "O"
+    mw = char_width(marker)
+    cx = x + (width - mw) // 2 if mw > 1 else x + width // 2
 
     # Draw as rounded box first
     draw_rounded(canvas, x, y, width, height, label, cs, style=style)
@@ -398,7 +401,7 @@ def _draw_label(
     start_row = y + (height - len(lines)) // 2
     for i, line in enumerate(lines):
         row = start_row + i
-        col = x + (width - len(line)) // 2
+        col = x + (width - display_width(line)) // 2
         if 0 <= row < canvas.height:
             canvas.put_text(row, col, line, style=label_style)
 
@@ -408,9 +411,11 @@ def draw_start_state(
     label: str, cs: CharSet, style: str = "",
 ) -> None:
     """Draw a start state: filled circle (●)."""
+    marker = "●" if cs.horizontal == "─" else "*"
+    mw = char_width(marker)
     cy = y + height // 2
-    cx = x + width // 2
-    canvas.put(cy, cx, "●" if cs.horizontal == "─" else "*", style=style)
+    cx = x + (width - mw) // 2 if mw > 1 else x + width // 2
+    canvas.put(cy, cx, marker, style=style)
 
 
 def draw_end_state(
@@ -418,9 +423,11 @@ def draw_end_state(
     label: str, cs: CharSet, style: str = "",
 ) -> None:
     """Draw an end state: bullseye (◉)."""
+    marker = "◉" if cs.horizontal == "─" else "@"
+    mw = char_width(marker)
     cy = y + height // 2
-    cx = x + width // 2
-    canvas.put(cy, cx, "◉" if cs.horizontal == "─" else "@", style=style)
+    cx = x + (width - mw) // 2 if mw > 1 else x + width // 2
+    canvas.put(cy, cx, marker, style=style)
 
 
 def draw_fork_join(

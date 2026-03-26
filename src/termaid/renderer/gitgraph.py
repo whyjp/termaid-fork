@@ -8,6 +8,7 @@ from __future__ import annotations
 from ..model.gitgraph import Commit, GitGraph
 from .canvas import Canvas
 from .charset import ASCII, UNICODE, CharSet
+from .textwidth import char_width, display_width
 
 # ── layout constants ──────────────────────────────────────────────
 _MIN_COMMIT_GAP = 6  # minimum horizontal gap between commit markers
@@ -53,12 +54,19 @@ def _sort_branches(diagram: GitGraph) -> list[str]:
     return [name for _, _, name in ordered]
 
 
-def _commit_footprint(c: Commit) -> int:
-    """Return the half-width of the widest label (id or tag) for a commit."""
-    w = len(c.id)
+def _commit_footprint(c: Commit, use_ascii: bool = False) -> int:
+    """Return the half-width of the widest label (id or tag) for a commit.
+
+    Accounts for the commit marker's display width so that adjacent
+    markers don't overlap in CJK mode where ● is 2 columns.
+    """
+    w = display_width(c.id)
     if c.tag:
-        w = max(w, len(c.tag) + 2)  # "[tag]"
-    return (w + 1) // 2  # ceil half
+        w = max(w, display_width(c.tag) + 2)  # "[tag]"
+    # Ensure the footprint is at least half the marker's display width
+    marker = _get_marker(c.type, use_ascii)
+    mw = char_width(marker)
+    return max((w + 1) // 2, (mw + 1) // 2)
 
 
 def _compute_branch_extents_lr(
@@ -118,7 +126,7 @@ def _compute_layout_lr(
 
     branch_label_width = 0
     for name in sorted_branches:
-        branch_label_width = max(branch_label_width, len(name))
+        branch_label_width = max(branch_label_width, display_width(name))
     left_offset = _MARGIN + branch_label_width + 2
 
     # Adaptive per-commit column placement:
@@ -128,21 +136,23 @@ def _compute_layout_lr(
 
     if commits:
         # First commit: place at left_offset + its own half-width
-        fp0 = _commit_footprint(commits[0])
+        fp0 = _commit_footprint(commits[0], use_ascii)
         commit_col[commits[0].id] = left_offset + fp0
 
         for i in range(1, len(commits)):
             prev = commits[i - 1]
             curr = commits[i]
-            prev_fp = _commit_footprint(prev)
-            curr_fp = _commit_footprint(curr)
-            # Minimum gap so labels don't overlap
-            label_gap = prev_fp + _LABEL_PAD + curr_fp
-            gap = max(_MIN_COMMIT_GAP, label_gap)
+            prev_fp = _commit_footprint(prev, use_ascii)
+            curr_fp = _commit_footprint(curr, use_ascii)
+            # Minimum gap so labels don't overlap.
+            # Account for wide commit markers (CJK mode: ● = 2 cols)
+            marker_extra = char_width(_get_marker("NORMAL", use_ascii)) - 1
+            label_gap = prev_fp + _LABEL_PAD + curr_fp + marker_extra
+            gap = max(_MIN_COMMIT_GAP + marker_extra, label_gap)
             commit_col[curr.id] = commit_col[prev.id] + gap
 
     last_col = max(commit_col.values(), default=left_offset)
-    last_fp = _commit_footprint(commits[-1]) if commits else 0
+    last_fp = _commit_footprint(commits[-1], use_ascii) if commits else 0
     canvas_width = last_col + last_fp + _MARGIN + 1
     canvas_height = _MARGIN + len(sorted_branches) * row_height + _MARGIN
 
@@ -170,7 +180,7 @@ def _draw_lr(
 
     commit_map: dict[str, Commit] = {c.id: c for c in diagram.commits}
 
-    branch_label_width = max((len(b) for b in sorted_branches), default=0)
+    branch_label_width = max((display_width(b) for b in sorted_branches), default=0)
     line_start_col = _MARGIN + branch_label_width + 1
 
     # Compute branch line extents (with merge/fork extensions)
@@ -213,21 +223,40 @@ def _draw_lr(
             for r in range(r_min, r_max + 1):
                 canvas.put(r, col, v_char, style="edge")
 
+    # Build a set of columns occupied by vertical merge/fork lines
+    # so labels can avoid overlapping them.
+    merge_cols: set[int] = set()
+    for c in diagram.commits:
+        col = commit_col[c.id]
+        for parent_id in c.parents:
+            if parent_id not in commit_map:
+                continue
+            parent = commit_map[parent_id]
+            if parent.branch != c.branch:
+                merge_cols.add(col)
+
     # 4. Draw commit markers and labels (LAST so they are visible)
     for c in diagram.commits:
         col = commit_col[c.id]
         row = branch_row[c.branch]
         marker = _get_marker(c.type, use_ascii)
+        mw = char_width(marker)
 
         canvas.put(row, col, marker, merge=False, style="node")
 
+        # Center label under the marker's visual midpoint.
+        # If the label would land on or immediately after a merge vertical
+        # line (which occupies the col below ┼), nudge it right.
         label = c.id
-        label_col = col - len(label) // 2
+        visual_center = col + mw // 2
+        label_col = visual_center - display_width(label) // 2
+        if col in merge_cols and label_col <= col + 1 and mw > 1:
+            label_col = col + 2
         canvas.put_text(row + 1, label_col, label, style="label")
 
         if c.tag:
             tag_text = f"[{c.tag}]"
-            tag_col = col - len(tag_text) // 2
+            tag_col = visual_center - display_width(tag_text) // 2
             canvas.put_text(row - 1, tag_col, tag_text, style="edge_label")
 
 
@@ -255,11 +284,11 @@ def _draw_tb(
     # Compute column gap based on max label width
     max_label = 0
     for b in sorted_branches:
-        max_label = max(max_label, len(b))
+        max_label = max(max_label, display_width(b))
     for c in diagram.commits:
-        max_label = max(max_label, len(c.id))
+        max_label = max(max_label, display_width(c.id))
         if c.tag:
-            max_label = max(max_label, len(c.tag) + 2)
+            max_label = max(max_label, display_width(c.tag) + 2)
 
     col_gap = max(max_label + 4, 10)
 
@@ -331,7 +360,7 @@ def _draw_tb(
         label_row = _MARGIN
     for name in sorted_branches:
         col = branch_col[name]
-        label_col = col - len(name) // 2
+        label_col = col - display_width(name) // 2
         canvas.put_text(label_row, label_col, name, style="subgraph")
 
     # 2. Draw branch lines (vertical)
@@ -369,21 +398,23 @@ def _draw_tb(
         row = commit_row[c.id]
         col = branch_col[c.branch]
         marker = _get_marker(c.type, use_ascii)
+        mw = char_width(marker)
 
         canvas.put(row, col, marker, merge=False, style="node")
 
-        label_col = col - len(c.id) // 2
+        visual_center = col + mw // 2
+        label_col = visual_center - display_width(c.id) // 2
         if bottom_to_top:
             canvas.put_text(row - 1, label_col, c.id, style="label")
             if c.tag:
                 tag_text = f"[{c.tag}]"
-                tag_col = col - len(tag_text) // 2
+                tag_col = visual_center - display_width(tag_text) // 2
                 canvas.put_text(row + 1, tag_col, tag_text, style="edge_label")
         else:
             canvas.put_text(row + 1, label_col, c.id, style="label")
             if c.tag:
                 tag_text = f"[{c.tag}]"
-                tag_col = col - len(tag_text) // 2
+                tag_col = visual_center - display_width(tag_text) // 2
                 canvas.put_text(row - 1, tag_col, tag_text, style="edge_label")
 
 
